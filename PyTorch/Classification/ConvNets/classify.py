@@ -18,6 +18,7 @@ import json
 import torch
 from torch.cuda.amp import autocast
 import torch.backends.cudnn as cudnn
+import nvtx
 
 from image_classification import models
 import torchvision.transforms as transforms
@@ -34,6 +35,62 @@ from image_classification.models import (
     efficientnet_quant_b4,
 )
 
+import torch.cuda.profiler as profiler
+import pyprof  
+pyprof.init()  
+
+class AnnotatedResNet50(torch.nn.Module):
+    name = 'AnnotatedResNet50'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.model = resnet50(*args, **kwargs).cuda()
+
+    def _forward_impl(self, x):
+    # Stem
+        start = nvtx.start_range(message="Stem", color="blue")
+        x = self.model.conv1(x)
+        x = self.model.bn1(x)
+        x = self.model.relu(x)
+        x = self.model.maxpool(x)
+        torch.cuda.synchronize()
+        nvtx.end_range(start)
+        
+        # Layer 1 (first stage: conv2_x)
+        start = nvtx.start_range(message="Layer1", color="green")
+        x = self.model.layers[0](x)  # layers[0] is equivalent to layer1
+        torch.cuda.synchronize()
+        nvtx.end_range(start)
+
+        # Layer 25 (approximation: conv3_x and conv4_x)
+        start = nvtx.start_range(message="Layer25", color="red")
+        x = self.model.layers[1](x)  # layers[1] is equivalent to layer2
+        x = self.model.layers[2](x)  # layers[2] is equivalent to layer3
+        torch.cuda.synchronize()
+        nvtx.end_range(start)
+
+        # Layer 50 (last stage: conv5_x)
+        start = nvtx.start_range(message="Layer50", color="orange")
+        x = self.model.layers[3](x)  # layers[3] is equivalent to layer4
+        torch.cuda.synchronize()
+        nvtx.end_range(start)
+
+        # Final Classifier
+        start = nvtx.start_range(message="Classifier", color="purple")
+        x = self.model.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.model.fc(x)
+        torch.cuda.synchronize()
+        nvtx.end_range(start)
+    
+        return x
+    
+    def forward(self, x):
+        return self._forward_impl(x)
+
+    @classmethod
+    def parser(cls):
+        return resnet50.parser()
 
 def available_models():
     models = {
@@ -48,6 +105,7 @@ def available_models():
             efficientnet_widese_b4,
             efficientnet_quant_b0,
             efficientnet_quant_b4,
+            AnnotatedResNet50,
         ]
     }
     return models
@@ -135,7 +193,10 @@ def main(args, model_args):
     input = load_jpeg_from_file(args.image, args.image_size, cuda=not args.cpu)
 
     with torch.no_grad(), autocast(enabled=args.precision == "AMP"):
-        output = torch.nn.functional.softmax(model(input), dim=1)
+        profiler.start()
+        output = model(input)
+        profiler.stop()
+        output = torch.nn.functional.softmax(output, dim=1)
 
     output = output.float().cpu().view(-1).numpy()
     top5 = np.argsort(output)[-5:][::-1]
