@@ -11,7 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from PIL import Image
+import torch.nn as nn
 import argparse
 import numpy as np
 import json
@@ -39,6 +41,44 @@ import torch.cuda.profiler as profiler
 import pyprof  
 pyprof.init()  
 
+class TransformerBlock(nn.Module):
+    name = 'TransformerBlock'
+    def __init__(self, embed_dim=512, num_heads=8, ff_dim=2048, dropout=0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout)
+        self.ffn1 = nn.Linear(embed_dim, ff_dim)
+        self.ffn2 = nn.Linear(ff_dim, embed_dim)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        # Multi-Head Attention
+        start = nvtx.start_range(message="attention", color="blue")
+        attn_output, _ = self.attn(x, x, x)  # Self-attention: query=key=value
+        torch.cuda.synchronize()
+        nvtx.end_range(start)
+        attn_output = self.dropout(attn_output)
+        x = self.norm1(x + attn_output)  # Residual + LayerNorm
+
+        # Feed-Forward Network
+        start = nvtx.start_range(message="feed_forward", color="green")
+        ffn_mid = self.relu(self.ffn1(x))  # First FFN layer
+        ffn_output = self.ffn2(ffn_mid)    # Second FFN layer
+        torch.cuda.synchronize()
+        nvtx.end_range(start)
+        ffn_output = self.dropout(ffn_output)
+        x = self.norm2(x + ffn_output)
+
+        # Softmax is implicit in MultiheadAttention; extract intermediate for shape
+        return x, attn_output, ffn_mid
+
+    @classmethod
+    def parser(cls):
+        parser = argparse.ArgumentParser(description="TransformerBlock options")
+        return parser
+    
 class AnnotatedResNet50(torch.nn.Module):
     name = 'AnnotatedResNet50'
 
@@ -106,6 +146,7 @@ def available_models():
             efficientnet_quant_b0,
             efficientnet_quant_b4,
             AnnotatedResNet50,
+            TransformerBlock
         ]
     }
     return models
@@ -127,6 +168,8 @@ def add_parser_arguments(parser):
     )
     parser.add_argument("--cpu", action="store_true", help="perform inference on CPU")
     parser.add_argument("--image", metavar="<path>", help="path to classified image")
+    parser.add_argument("--batch_size", type=int, default=8, help="batch size for transformer")
+    parser.add_argument("--seq_len", type=int, default=32, help="sequence length for transformer")
 
 
 def load_jpeg_from_file(path, image_size, cuda=True):
@@ -190,11 +233,21 @@ def main(args, model_args):
         model = model.cuda()
     model.eval()
 
-    input = load_jpeg_from_file(args.image, args.image_size, cuda=not args.cpu)
+    if args.arch == "TransformerBlock":
+        input = torch.randn(args.seq_len, args.batch_size, 512).cuda()
+    elif args.image:
+        input = load_jpeg_from_file(args.image, args.image_size, cuda=not args.cpu)
+    else:
+        raise ValueError("Image path required for non-TransformerBlock models")
 
     with torch.no_grad(), autocast(enabled=args.precision == "AMP"):
         profiler.start()
-        output = model(input)
+        if args.arch == "TransformerBlock":
+            output, attn_output, ffn_mid = model(input)
+            print(f"Multi-Head Attention Output Shape: {attn_output.shape}")
+            print(f"First Feed-Forward Layer Output Shape: {ffn_mid.shape}")
+        else: 
+            output = model(input)
         profiler.stop()
         output = torch.nn.functional.softmax(output, dim=1)
 
