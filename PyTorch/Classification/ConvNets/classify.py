@@ -87,7 +87,7 @@ class AnnotatedResNet50(torch.nn.Module):
         self.model = resnet50(*args, **kwargs).cuda()
 
     def _forward_impl(self, x):
-    # Stem
+        # Stem
         start = nvtx.start_range(message="Stem", color="blue")
         x = self.model.conv1(x)
         x = self.model.bn1(x)
@@ -95,25 +95,77 @@ class AnnotatedResNet50(torch.nn.Module):
         x = self.model.maxpool(x)
         torch.cuda.synchronize()
         nvtx.end_range(start)
-        
-        # Layer 1 (first stage: conv2_x)
+
+        # Layer 1 (layers[0][0].conv1)
+        residual = x  # Save input for residual
         start = nvtx.start_range(message="Layer1", color="green")
-        x = self.model.layers[0](x)  # layers[0] is equivalent to layer1
+        x = self.model.layers[0][0].conv1(x)  # First layer after stem
         torch.cuda.synchronize()
         nvtx.end_range(start)
+        x = self.model.layers[0][0].bn1(x)
+        x = self.model.layers[0][0].relu(x)
+        x = self.model.layers[0][0].conv2(x)
+        x = self.model.layers[0][0].bn2(x)
+        x = self.model.layers[0][0].relu(x)
+        x = self.model.layers[0][0].conv3(x)
+        x = self.model.layers[0][0].bn3(x)
+        if self.model.layers[0][0].downsample:
+            residual = self.model.layers[0][0].downsample(residual)  # Downsample input
+        x = x + residual
+        x = self.model.layers[0][0].relu(x)
 
-        # Layer 25 (approximation: conv3_x and conv4_x)
+        # Rest of layers[0]
+        for i in range(1, len(self.model.layers[0])):
+            x = self.model.layers[0][i](x)
+
+        # layers[1]
+        x = self.model.layers[1](x)
+
+        # layers[2] up to Layer 25 (layers[2][1].conv1)
+        for i in range(1):  # layers[2][0]
+            x = self.model.layers[2][i](x)
+        # Layer 25
+        residual = x
         start = nvtx.start_range(message="Layer25", color="red")
-        x = self.model.layers[1](x)  # layers[1] is equivalent to layer2
-        x = self.model.layers[2](x)  # layers[2] is equivalent to layer3
+        x = self.model.layers[2][1].conv1(x)  # 25th layer
         torch.cuda.synchronize()
         nvtx.end_range(start)
+        x = self.model.layers[2][1].bn1(x)
+        x = self.model.layers[2][1].relu(x)
+        x = self.model.layers[2][1].conv2(x)
+        x = self.model.layers[2][1].bn2(x)
+        x = self.model.layers[2][1].relu(x)
+        x = self.model.layers[2][1].conv3(x)
+        x = self.model.layers[2][1].bn3(x)
+        if self.model.layers[2][1].downsample:
+            residual = self.model.layers[2][1].downsample(residual)
+        x = x + residual
+        x = self.model.layers[2][1].relu(x)
 
-        # Layer 50 (last stage: conv5_x)
+        # Rest of layers[2]
+        for i in range(2, len(self.model.layers[2])):
+            x = self.model.layers[2][i](x)
+
+        # layers[3] up to Layer 50 (layers[3][2].conv3)
+        for i in range(2):  # layers[3][0] and [1]
+            x = self.model.layers[3][i](x)
+        # Layer 50
+        residual = x
+        x = self.model.layers[3][2].conv1(x)
+        x = self.model.layers[3][2].bn1(x)
+        x = self.model.layers[3][2].relu(x)
+        x = self.model.layers[3][2].conv2(x)
+        x = self.model.layers[3][2].bn2(x)
+        x = self.model.layers[3][2].relu(x)
         start = nvtx.start_range(message="Layer50", color="orange")
-        x = self.model.layers[3](x)  # layers[3] is equivalent to layer4
+        x = self.model.layers[3][2].conv3(x)  # 50th layer
         torch.cuda.synchronize()
         nvtx.end_range(start)
+        x = self.model.layers[3][2].bn3(x)
+        if self.model.layers[3][2].downsample:
+            residual = self.model.layers[3][2].downsample(residual)
+        x = x + residual
+        x = self.model.layers[3][2].relu(x)
 
         # Final Classifier
         start = nvtx.start_range(message="Classifier", color="purple")
@@ -122,16 +174,16 @@ class AnnotatedResNet50(torch.nn.Module):
         x = self.model.fc(x)
         torch.cuda.synchronize()
         nvtx.end_range(start)
-    
+
         return x
-    
+
     def forward(self, x):
         return self._forward_impl(x)
 
     @classmethod
     def parser(cls):
         return resnet50.parser()
-
+        
 def available_models():
     models = {
         m.name: m
