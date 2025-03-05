@@ -90,11 +90,11 @@ class AnnotatedResNet50(torch.nn.Module):
         # Stem
         start = nvtx.start_range(message="Stem", color="blue")
         x = self.model.conv1(x)
+        torch.cuda.synchronize()
+        nvtx.end_range(start)
         x = self.model.bn1(x)
         x = self.model.relu(x)
         x = self.model.maxpool(x)
-        torch.cuda.synchronize()
-        nvtx.end_range(start)
 
         # Layer 1 (layers[0][0].conv1)
         residual = x  # Save input for residual
